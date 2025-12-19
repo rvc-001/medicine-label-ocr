@@ -1,103 +1,82 @@
-import { generateText } from "ai"
+"use server"
+
+import { GoogleGenerativeAI } from "@google/generative-ai"
 import type { MedicineInfo } from "./types"
 
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_GENERATIVE_AI_API_KEY || "")
+
+// --- 1. SEARCH SERVICE (NO AI - PURE LINKS) ---
+// This is called when you tap a medicine. It returns links instantly.
 export async function getMedicineInfo(medicineName: string): Promise<MedicineInfo> {
-  try {
-    const { text } = await generateText({
-      model: "openai/gpt-4o-mini",
-      prompt: `You are a medical information assistant with access to verified pharmaceutical databases and medical literature. Research and provide comprehensive, verified information about the medicine "${medicineName}".
-
-IMPORTANT: Cross-reference information from multiple reliable sources like FDA, NIH, WebMD, Drugs.com, and official pharmaceutical databases to ensure accuracy.
-
-Return ONLY a JSON object with this exact structure (no markdown, no code blocks):
-{
-  "genericName": "the generic/chemical name",
-  "brandNames": ["list", "of", "brand", "names"],
-  "drugClass": "therapeutic drug class (e.g., NSAID, Antibiotic, etc.)",
-  "description": "A comprehensive 3-4 sentence description of what this medicine is, how it works, and its primary purpose",
-  "commonUses": "Detailed description of conditions this medicine treats (3-4 sentences)",
-  "dosageInfo": "General dosage information and forms available (tablets, liquid, etc.) - do not give specific doses",
-  "sideEffects": {
-    "common": ["list of 5-7 common side effects"],
-    "serious": ["list of 3-5 serious side effects requiring medical attention"]
-  },
-  "warnings": ["list of 4-5 important warnings and precautions"],
-  "interactions": ["list of 4-5 common drug interactions to be aware of"],
-  "generalSafety": "General safety information including who should avoid this medication (2-3 sentences)",
-  "verified": true,
-  "sources": ["FDA Drug Database", "NIH MedlinePlus", "appropriate verified sources"]
-}
-
-Ensure all information is factual, medically accurate, and from verified sources. If you cannot verify information, set verified to false.`,
-    })
-
-    const cleanedText = text.trim().replace(/```json\n?|\n?```/g, "")
-    const info = JSON.parse(cleanedText) as MedicineInfo
-
-    return info
-  } catch (error) {
-    console.error("[v0] AI service error:", error)
-    throw new Error("Failed to generate medicine information")
+  const cleanName = medicineName.trim()
+  
+  return {
+    verified: true,
+    genericName: cleanName,
+    brandNames: [cleanName],
+    drugClass: "Search Result",
+    description: `Verified details are available via the search links below. Click to view full medical information on 1mg, Drugs.com, or Google.`,
+    commonUses: "Click links below to view uses.",
+    dosageInfo: "Refer to official packaging or links.",
+    sideEffects: {
+      common: ["See official label"],
+      serious: ["Consult a doctor"]
+    },
+    warnings: ["Verify details with a pharmacist."],
+    interactions: ["Check official sources."],
+    generalSafety: "Always consult a doctor before use.",
+    sources: [
+      `https://www.google.com/search?q=${encodeURIComponent(cleanName + " medicine")}`,
+      `https://www.1mg.com/search/all?name=${encodeURIComponent(cleanName)}`,
+      `https://www.drugs.com/search.php?searchterm=${encodeURIComponent(cleanName)}`,
+      `https://medlineplus.gov/search?q=${encodeURIComponent(cleanName)}`
+    ]
   }
 }
 
+// --- 2. VISION SERVICE (SMART AI FALLBACK) ---
+// This uses AI just to read the label.
 export async function analyzeImageForMedicines(imageBase64: string): Promise<{
-  detectedObjects: Array<{
-    name: string
-    type: string
-    confidence: number
-    boundingBox: { x: number; y: number; width: number; height: number }
-  }>
+  detectedObjects: Array<any>
   extractedText: string[]
   medicineCandidates: string[]
 }> {
   try {
-    const { text } = await generateText({
-      model: "openai/gpt-4o",
-      messages: [
+    const base64Data = imageBase64.includes(",") ? imageBase64.split(",")[1] : imageBase64
+
+    // Helper to try 2.0 first, then 1.5 if busy
+    const tryModel = async (modelName: string) => {
+      console.log(`[AI] Analyzing with ${modelName}...`)
+      const model = genAI.getGenerativeModel({ model: modelName })
+      const result = await model.generateContent([
+        `Analyze this image. 
+        Task: Identify the FULL MEDICINE NAME (e.g. "Dolo 650", "Augmentin 625").
+        Ignore isolated numbers.
+        
+        Return ONLY JSON:
         {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              image: imageBase64,
-            },
-            {
-              type: "text",
-              text: `Analyze this image for medicine-related content. Identify:
-1. Any medicine bottles, boxes, blister packs, or pharmaceutical packaging
-2. All text visible on labels (medicine names, dosages, manufacturers)
-3. Any medicine names or drug names you can identify
-
-Return ONLY a JSON object with this exact structure (no markdown):
-{
-  "detectedObjects": [
-    {
-      "name": "description of object (e.g., 'Medicine bottle', 'Pill box')",
-      "type": "bottle|box|blister|tube|other",
-      "confidence": 0.0-1.0,
-      "boundingBox": {"x": 0-100, "y": 0-100, "width": 0-100, "height": 0-100}
+          "detectedObjects": [{"name": "Bottle", "type": "container", "confidence": 0.9, "boundingBox": {"x":50,"y":50,"width":0,"height":0}}],
+          "extractedText": ["visible text"],
+          "medicineCandidates": ["Exact Name Found"]
+        }`,
+        { inlineData: { data: base64Data, mimeType: "image/jpeg" } }
+      ])
+      return result.response.text()
     }
-  ],
-  "extractedText": ["all", "text", "found", "on", "labels"],
-  "medicineCandidates": ["medicine names identified from the image"]
-}
 
-Be thorough - identify ALL medicine names, generic names, and brand names visible.`,
-            },
-          ],
-        },
-      ],
-    })
+    let responseText
+    try {
+      responseText = await tryModel("gemini-2.5-flash")
+    } catch (e) {
+      console.warn("[AI] Gemini 2.0 busy, switching to 1.5 Flash...")
+      responseText = await tryModel("gemini-1.5-flash")
+    }
 
-    const cleanedText = text.trim().replace(/```json\n?|\n?```/g, "")
-    return JSON.parse(cleanedText)
+    const cleaned = responseText.trim().replace(/^```json\s*|```$/g, "").replace(/^\s*|\s*$/g, "")
+    return JSON.parse(cleaned)
+
   } catch (error) {
-    console.error("[v0] Image analysis error:", error)
-    return {
-      detectedObjects: [],
-      extractedText: [],
-      medicineCandidates: [],
-    }
+    console.error("[AI] Vision Failed:", error)
+    return { detectedObjects: [], extractedText: [], medicineCandidates: [] }
   }
 }

@@ -28,13 +28,17 @@ export function CameraView({ onClose, onScanComplete }: CameraViewProps) {
 
     const initCamera = async () => {
       try {
-        const mediaStream = await navigator.mediaDevices.getUserMedia({
+        const constraints = {
+          audio: false,
           video: {
-            facingMode: "environment",
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
+            facingMode: { ideal: "environment" },
+            // Lower resolution slightly to prevent memory crashes on older phones
+            width: { ideal: 1280 }, 
+            height: { ideal: 720 },
           },
-        })
+        }
+
+        const mediaStream = await navigator.mediaDevices.getUserMedia(constraints)
 
         if (!mounted) {
           mediaStream.getTracks().forEach((track) => track.stop())
@@ -44,9 +48,12 @@ export function CameraView({ onClose, onScanComplete }: CameraViewProps) {
         setStream(mediaStream)
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream
+          videoRef.current.setAttribute("playsinline", "true") 
+          videoRef.current.play().catch(console.error)
         }
       } catch (error) {
-        console.error("[v0] Camera initialization error:", error)
+        console.error("Camera Init Error:", error)
+        alert("Camera failed. Please refresh and allow permissions.")
       }
     }
 
@@ -54,79 +61,55 @@ export function CameraView({ onClose, onScanComplete }: CameraViewProps) {
 
     return () => {
       mounted = false
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop())
-      }
+      if (stream) stream.getTracks().forEach((track) => track.stop())
     }
   }, [])
 
   const handleCapture = async () => {
-    if (!videoRef.current || !canvasRef.current) return
-
+    if (!videoRef.current || !canvasRef.current || isProcessing) return
+    
     setIsProcessing(true)
-    setProcessingStage("Capturing image...")
+    setProcessingStage("Analyzing...")
 
-    const canvas = canvasRef.current
     const video = videoRef.current
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
+    const canvas = canvasRef.current
+    
+    // Set max dimension to 1024px to save memory/bandwidth
+    const scale = Math.min(1024 / video.videoWidth, 1024 / video.videoHeight, 1)
+    canvas.width = video.videoWidth * scale
+    canvas.height = video.videoHeight * scale
 
     const ctx = canvas.getContext("2d")
-    if (!ctx) {
-      setIsProcessing(false)
-      return
+    if (ctx) {
+      // Draw scaled image
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+      
+      const imageUrl = canvas.toDataURL("image/jpeg", 0.8)
+      setCapturedImage(imageUrl)
+      
+      // Pause stream instead of stopping tracks immediately (faster retake)
+      video.pause()
+      
+      try {
+        const medicines = await performOCR(canvas)
+        setDetectedMedicines(medicines)
+        if (medicines.length === 0) {
+            alert("No medicines found. Try getting closer to the label.")
+        }
+      } catch (e) {
+        console.error(e)
+        alert("An error occurred during scanning.")
+      }
     }
-
-    ctx.drawImage(video, 0, 0)
-    const imageDataUrl = canvas.toDataURL("image/png")
-    setCapturedImage(imageDataUrl)
-
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop())
-    }
-
-    try {
-      setProcessingStage("Running OCR analysis...")
-      await new Promise((r) => setTimeout(r, 500))
-
-      setProcessingStage("Detecting objects with AI...")
-      await new Promise((r) => setTimeout(r, 500))
-
-      setProcessingStage("Identifying medicines...")
-      const medicines = await performOCR(canvas)
-
-      setProcessingStage("Verifying results...")
-      await new Promise((r) => setTimeout(r, 300))
-
-      setDetectedMedicines(medicines)
-    } catch (error) {
-      console.error("[v0] OCR error:", error)
-    } finally {
-      setIsProcessing(false)
-      setProcessingStage("")
-    }
+    setIsProcessing(false)
   }
 
-  const handleRetake = async () => {
+  const handleRetake = () => {
     setCapturedImage(null)
     setDetectedMedicines([])
     setSelectedMedicine(null)
-
-    try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: "environment",
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-      })
-
-      setStream(mediaStream)
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream
-      }
-    } catch (error) {
-      console.error("[v0] Camera restart error:", error)
+    if (videoRef.current) {
+        videoRef.current.play().catch(console.error)
     }
   }
 
@@ -138,138 +121,51 @@ export function CameraView({ onClose, onScanComplete }: CameraViewProps) {
     }
   }
 
-  const handleMarkerTap = (medicineName: string) => {
-    setSelectedMedicine(medicineName)
-  }
-
-  const handleCloseBottomSheet = () => {
-    setSelectedMedicine(null)
-  }
-
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-black">
       {capturedImage ? (
-        <img
-          src={capturedImage || "/placeholder.svg"}
-          alt="Captured medicine label"
-          className="h-full w-full object-cover"
-        />
+        <img src={capturedImage} className="h-full w-full object-contain" alt="captured" />
       ) : (
         <video ref={videoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
       )}
-
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Scanning overlay animation */}
-      {!capturedImage && !isProcessing && (
-        <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute inset-x-8 inset-y-32 border-2 border-primary/50 rounded-2xl">
-            <div className="absolute inset-0 overflow-hidden rounded-2xl">
-              <div
-                className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-primary to-transparent animate-pulse"
-                style={{ animation: "scanLine 2s ease-in-out infinite" }}
-              />
-            </div>
-            <div className="absolute -top-1 -left-1 w-8 h-8 border-t-2 border-l-2 border-primary rounded-tl-xl" />
-            <div className="absolute -top-1 -right-1 w-8 h-8 border-t-2 border-r-2 border-primary rounded-tr-xl" />
-            <div className="absolute -bottom-1 -left-1 w-8 h-8 border-b-2 border-l-2 border-primary rounded-bl-xl" />
-            <div className="absolute -bottom-1 -right-1 w-8 h-8 border-b-2 border-r-2 border-primary rounded-br-xl" />
-          </div>
-        </div>
-      )}
+      {/* Close Button */}
+      <div className="absolute top-4 right-4 z-20">
+        <Button size="icon" variant="ghost" onClick={onClose} className="rounded-full bg-black/20 text-white">
+          <X className="h-6 w-6" />
+        </Button>
+      </div>
 
-      <div className="absolute left-0 right-0 top-0 z-10 backdrop-blur-xl bg-black/30 px-4 py-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
-              <CameraIcon className="h-4 w-4 text-primary-foreground" />
-            </div>
-            <span className="text-sm font-medium text-white">
-              {capturedImage ? "Tap medicines for details" : "Point at medicine labels"}
-            </span>
-          </div>
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={onClose}
-            className="h-9 w-9 rounded-full backdrop-blur-xl bg-white/10 text-white hover:bg-white/20"
+      {/* Markers */}
+      {capturedImage && detectedMedicines.map((m) => (
+        <AnnotationMarker key={m.id} medicine={m} onTap={setSelectedMedicine} />
+      ))}
+
+      {/* Controls */}
+      <div className="absolute bottom-0 w-full p-6 bg-linear-to-t from-black/80 to-transparent z-20 flex justify-center gap-4">
+        {capturedImage ? (
+           <>
+             <Button type="button" onClick={handleRetake} variant="outline" className="h-12 px-6">Retake</Button>
+             <Button type="button" onClick={handleDone} className="h-12 px-6">Done</Button>
+           </>
+        ) : (
+          <Button 
+            type="button"
+            onClick={handleCapture} 
+            disabled={isProcessing}
+            className="h-20 w-20 rounded-full bg-white border-4 border-gray-300 hover:bg-gray-200"
           >
-            <X className="h-5 w-5" />
+            {isProcessing ? <Scan className="animate-spin text-black" /> : <CameraIcon className="h-8 w-8 text-black" />}
           </Button>
-        </div>
+        )}
       </div>
-
-      {capturedImage &&
-        detectedMedicines.map((medicine) => (
-          <AnnotationMarker key={medicine.id} medicine={medicine} onTap={handleMarkerTap} />
-        ))}
-
-      <div className="absolute bottom-0 left-0 right-0 z-10 backdrop-blur-xl bg-black/30 px-4 pb-8 pt-6">
-        <div className="flex items-center justify-center gap-4">
-          {capturedImage ? (
-            <div className="flex gap-3">
-              <Button
-                size="lg"
-                onClick={handleRetake}
-                variant="outline"
-                className="h-14 gap-2 px-6 text-base font-medium backdrop-blur-xl bg-white/10 border-white/20 text-white hover:bg-white/20"
-              >
-                <RotateCw className="h-5 w-5" />
-                Retake
-              </Button>
-              <Button
-                size="lg"
-                onClick={handleDone}
-                className="h-14 gap-2 px-8 text-base font-medium bg-primary hover:bg-primary/90"
-              >
-                <Scan className="h-5 w-5" />
-                Done ({detectedMedicines.length} found)
-              </Button>
-            </div>
-          ) : (
-            <Button
-              size="lg"
-              onClick={handleCapture}
-              disabled={isProcessing}
-              className="h-20 w-20 rounded-full shadow-lg shadow-primary/30 bg-primary hover:bg-primary/90"
-            >
-              {isProcessing ? (
-                <div className="h-8 w-8 animate-spin rounded-full border-3 border-primary-foreground border-t-transparent" />
-              ) : (
-                <CameraIcon className="h-8 w-8" />
-              )}
-            </Button>
-          )}
-        </div>
-      </div>
-
-      {isProcessing && (
-        <div className="absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 rounded-2xl backdrop-blur-xl bg-black/70 px-8 py-6 min-w-64">
-          <div className="flex flex-col items-center gap-4">
-            <div className="relative">
-              <div className="h-12 w-12 animate-spin rounded-full border-3 border-primary border-t-transparent" />
-              <Scan className="absolute inset-0 m-auto h-5 w-5 text-primary" />
-            </div>
-            <div className="text-center">
-              <p className="text-sm font-medium text-white">{processingStage}</p>
-              <p className="text-xs text-white/60 mt-1">AI-powered detection in progress</p>
-            </div>
-          </div>
-        </div>
-      )}
 
       <InfoBottomSheet
         medicineName={selectedMedicine}
-        isOpen={selectedMedicine !== null}
-        onClose={handleCloseBottomSheet}
+        isOpen={!!selectedMedicine}
+        onClose={() => setSelectedMedicine(null)}
       />
-
-      <style jsx>{`
-        @keyframes scanLine {
-          0%, 100% { top: 0; }
-          50% { top: 100%; }
-        }
-      `}</style>
     </div>
   )
 }
