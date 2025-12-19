@@ -1,11 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Allow your specific mobile IP to access the dev server
-  allowedDevOrigins: ["localhost:3000", "192.168.31.182:3000"],
+  // 1. Allow the mobile device IP to access the dev server
+  allowedDevOrigins: ["localhost:3000", "192.168.31.182:3000", "192.168.31.182"],
   
   experimental: {
     serverActions: {
-      allowedOrigins: ["localhost:3000", "192.168.31.182:3000"]
+      // 2. Allow Server Actions from the mobile IP (Fixes "Blocked cross-origin")
+      allowedOrigins: ["localhost:3000", "192.168.31.182:3000", "192.168.31.182"]
     }
   }
 };
